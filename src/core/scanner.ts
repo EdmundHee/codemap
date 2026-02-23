@@ -8,7 +8,7 @@ export interface ScannedFile {
   /** Relative path from project root */
   relative: string;
   /** Detected language */
-  language: 'typescript' | 'javascript' | 'python' | 'unknown';
+  language: 'typescript' | 'javascript' | 'python' | 'vue' | 'unknown';
 }
 
 const LANGUAGE_MAP: Record<string, ScannedFile['language']> = {
@@ -19,6 +19,7 @@ const LANGUAGE_MAP: Record<string, ScannedFile['language']> = {
   '.mjs': 'javascript',
   '.cjs': 'javascript',
   '.py': 'python',
+  '.vue': 'vue',
 };
 
 /**

@@ -32,7 +32,13 @@ export class TypeScriptParser implements ParserInterface {
   async parse(file: ScannedFile): Promise<ParsedFile> {
     const content = readFileSync(file.absolute, 'utf-8');
     const hash = createHash('md5').update(content).digest('hex').slice(0, 8);
+    return this.parseContent(file, content, hash);
+  }
 
+  /**
+   * Parse raw source content (used by Vue parser to pass extracted script blocks).
+   */
+  async parseContent(file: ScannedFile, content: string, hash: string): Promise<ParsedFile> {
     const sourceFile = this.project.createSourceFile(
       `__temp__${file.relative}`,
       content,

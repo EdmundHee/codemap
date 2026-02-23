@@ -4,6 +4,7 @@ import { Logger } from '../utils/logger';
 import { ParserInterface, ParsedFile } from '../parsers/parser.interface';
 import { TypeScriptParser } from '../parsers/typescript/ts-parser';
 import { PythonParser } from '../parsers/python/py-parser';
+import { VueParser } from '../parsers/vue/vue-parser';
 import { detectFrameworks } from '../frameworks/detector';
 import { buildImportGraph } from '../analyzers/import-graph';
 import { buildCallGraph } from '../analyzers/call-graph';
@@ -26,9 +27,11 @@ export class Orchestrator {
     this.parsers = new Map();
 
     // Register parsers for supported languages
-    this.parsers.set('typescript', new TypeScriptParser());
-    this.parsers.set('javascript', new TypeScriptParser()); // ts-morph handles JS too
+    const tsParser = new TypeScriptParser();
+    this.parsers.set('typescript', tsParser);
+    this.parsers.set('javascript', tsParser); // ts-morph handles JS too
     this.parsers.set('python', new PythonParser());
+    this.parsers.set('vue', new VueParser(tsParser)); // delegates script blocks to TS parser
   }
 
   async run(): Promise<void> {
