@@ -1,20 +1,26 @@
 #!/usr/bin/env node
 /**
- * Codemap MCP Server
+ * Codemap MCP Server (Multi-Project)
  *
  * Exposes codemap data as MCP tools so Claude Code (and other MCP clients)
  * can query project structure, call graphs, and relationships on demand.
  *
+ * Supports multiple projects. Pass project paths as CLI arguments:
+ *   codemap-mcp /path/to/project-a /path/to/project-b
+ *
+ * Or use a config file:
+ *   codemap-mcp --config ~/.codemap-projects.json
+ *
  * Usage:
- *   claude mcp add codemap -- npx codemap-mcp
- *   claude mcp add codemap -- node ./dist/mcp/server.js
+ *   claude mcp add codemap -- codemap-mcp ~/Work/project-a ~/Work/project-b
+ *   claude mcp add codemap -- codemap-mcp .
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { readFileSync, existsSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, basename } from 'path';
 import { CodemapData } from '../output/json-generator';
 import {
   getOverview,
@@ -28,44 +34,187 @@ import {
   getType,
 } from '../core/query-engine';
 
-// Determine project root: use env var, CLI arg, or cwd
-const projectRoot = resolve(process.env.CODEMAP_ROOT || process.argv[2] || process.cwd());
+// --- Multi-project registry ---
 
-function loadCodemapData(): CodemapData | null {
-  const codemapPath = join(projectRoot, '.codemap', 'codemap.json');
-  if (!existsSync(codemapPath)) {
-    return null;
+interface ProjectEntry {
+  name: string;
+  root: string;
+}
+
+/**
+ * Parse CLI args to build the project list.
+ * Supports: codemap-mcp /path/a /path/b
+ *           codemap-mcp --config ~/.codemap-projects.json
+ *           codemap-mcp (defaults to cwd)
+ */
+function resolveProjects(): ProjectEntry[] {
+  const args = process.argv.slice(2);
+
+  // --config flag: read from JSON file
+  const configIdx = args.indexOf('--config');
+  if (configIdx !== -1 && args[configIdx + 1]) {
+    const configPath = resolve(args[configIdx + 1]);
+    if (existsSync(configPath)) {
+      try {
+        const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+        // Config format: { "projects": ["/path/a", "/path/b"] }
+        // or: { "projects": [{ "name": "my-app", "root": "/path/a" }] }
+        const projects: ProjectEntry[] = (config.projects || []).map((p: string | ProjectEntry) => {
+          if (typeof p === 'string') {
+            const root = resolve(p);
+            return { name: basename(root), root };
+          }
+          return { ...p, root: resolve(p.root) };
+        });
+        return projects.length > 0 ? projects : [defaultProject()];
+      } catch {
+        return [defaultProject()];
+      }
+    }
   }
+
+  // Direct path arguments
+  const paths = args.filter((a) => !a.startsWith('--'));
+  if (paths.length > 0) {
+    return paths.map((p) => {
+      const root = resolve(p);
+      return { name: basename(root), root };
+    });
+  }
+
+  // Default: cwd
+  return [defaultProject()];
+}
+
+function defaultProject(): ProjectEntry {
+  const root = resolve(process.env.CODEMAP_ROOT || process.cwd());
+  return { name: basename(root), root };
+}
+
+// --- Data loading with cache ---
+
+const dataCache = new Map<string, { data: CodemapData; mtime: number }>();
+
+function loadProjectData(project: ProjectEntry): CodemapData | null {
+  const codemapPath = join(project.root, '.codemap', 'codemap.json');
+  if (!existsSync(codemapPath)) return null;
+
   try {
-    return JSON.parse(readFileSync(codemapPath, 'utf-8'));
+    const stat = require('fs').statSync(codemapPath);
+    const cached = dataCache.get(project.root);
+
+    // Use cache if file hasn't changed
+    if (cached && cached.mtime === stat.mtimeMs) {
+      return cached.data;
+    }
+
+    const data = JSON.parse(readFileSync(codemapPath, 'utf-8'));
+    dataCache.set(project.root, { data, mtime: stat.mtimeMs });
+    return data;
   } catch {
     return null;
   }
 }
 
+/**
+ * Resolve which project to query.
+ * If only one project, always use it.
+ * If multiple, require `project` param or return error hint.
+ */
+function resolveProject(
+  projects: ProjectEntry[],
+  projectName?: string
+): { project: ProjectEntry; data: CodemapData } | { error: string } {
+  if (projects.length === 1) {
+    const project = projects[0];
+    const data = loadProjectData(project);
+    if (!data) return { error: `No codemap found for "${project.name}". Run \`codemap generate\` in ${project.root}` };
+    return { project, data };
+  }
+
+  if (!projectName) {
+    const names = projects.map((p) => p.name).join(', ');
+    return { error: `Multiple projects available: [${names}]. Specify which one with the "project" parameter.` };
+  }
+
+  const match = projects.find(
+    (p) => p.name === projectName || p.root.endsWith(projectName)
+  );
+  if (!match) {
+    const names = projects.map((p) => p.name).join(', ');
+    return { error: `Project "${projectName}" not found. Available: [${names}]` };
+  }
+
+  const data = loadProjectData(match);
+  if (!data) return { error: `No codemap found for "${match.name}". Run \`codemap generate\` in ${match.root}` };
+  return { project: match, data };
+}
+
+function errorResult(message: string) {
+  return { content: [{ type: 'text' as const, text: message }], isError: true };
+}
+
+function jsonResult(data: any) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+// --- Main ---
+
 async function main() {
+  const projects = resolveProjects();
+
   const server = new McpServer({
     name: 'codemap',
     version: '0.1.0',
   });
 
+  // Common project param — optional when single project, required hint when multiple
+  const projectParam = z
+    .string()
+    .optional()
+    .describe(
+      projects.length > 1
+        ? `Project name to query. Available: ${projects.map((p) => p.name).join(', ')}`
+        : 'Project name (optional — defaults to the only registered project)'
+    );
+
+  // --- Tool: codemap_projects ---
+  server.tool(
+    'codemap_projects',
+    'List all registered codemap projects and their status.',
+    {},
+    async () => {
+      const list = projects.map((p) => {
+        const data = loadProjectData(p);
+        return {
+          name: p.name,
+          root: p.root,
+          has_codemap: !!data,
+          ...(data
+            ? {
+                files: Object.keys(data.files).length,
+                classes: Object.keys(data.classes).length,
+                functions: Object.keys(data.functions).length,
+                frameworks: data.project.frameworks,
+                languages: data.project.languages,
+                generated_at: data.generated_at,
+              }
+            : {}),
+        };
+      });
+      return jsonResult(list);
+    }
+  );
+
   // --- Tool: codemap_overview ---
   server.tool(
     'codemap_overview',
-    'Get a high-level overview of the project: modules, frameworks, languages, file counts, and dependencies. Use this first to understand project structure.',
-    {},
-    async () => {
-      const data = loadCodemapData();
-      if (!data) {
-        return {
-          content: [{ type: 'text', text: 'No codemap found. Run `codemap generate` first.' }],
-          isError: true,
-        };
-      }
-      const overview = getOverview(data);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(overview, null, 2) }],
-      };
+    'Get a high-level overview of a project: modules, frameworks, languages, file counts, and dependencies. Use this first to understand project structure.',
+    { project: projectParam },
+    async ({ project: projectName }) => {
+      const resolved = resolveProject(projects, projectName);
+      if ('error' in resolved) return errorResult(resolved.error);
+      return jsonResult(getOverview(resolved.data));
     }
   );
 
@@ -73,24 +222,16 @@ async function main() {
   server.tool(
     'codemap_module',
     'Get detailed information about a specific directory/module: its classes, functions, types, and imports.',
-    { directory: z.string().describe('Directory path to query (e.g. "src/core", "backend/api")') },
-    async ({ directory }) => {
-      const data = loadCodemapData();
-      if (!data) {
-        return {
-          content: [{ type: 'text', text: 'No codemap found. Run `codemap generate` first.' }],
-          isError: true,
-        };
-      }
-      const result = getModule(data, directory);
-      if (!result) {
-        return {
-          content: [{ type: 'text', text: `Module "${directory}" not found.` }],
-        };
-      }
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
+    {
+      directory: z.string().describe('Directory path to query (e.g. "src/core", "backend/api")'),
+      project: projectParam,
+    },
+    async ({ directory, project: projectName }) => {
+      const resolved = resolveProject(projects, projectName);
+      if ('error' in resolved) return errorResult(resolved.error);
+      const result = getModule(resolved.data, directory);
+      if (!result) return jsonResult({ error: `Module "${directory}" not found.` });
+      return jsonResult(result);
     }
   );
 
@@ -98,62 +239,32 @@ async function main() {
   server.tool(
     'codemap_query',
     'Search for a function, class, method, type, or file by name. Returns matching entries with their details.',
-    { name: z.string().describe('Name to search for (partial matching supported)') },
-    async ({ name }) => {
-      const data = loadCodemapData();
-      if (!data) {
-        return {
-          content: [{ type: 'text', text: 'No codemap found. Run `codemap generate` first.' }],
-          isError: true,
-        };
-      }
+    {
+      name: z.string().describe('Name to search for (partial matching supported)'),
+      project: projectParam,
+    },
+    async ({ name, project: projectName }) => {
+      const resolved = resolveProject(projects, projectName);
+      if ('error' in resolved) return errorResult(resolved.error);
+      const { data } = resolved;
 
-      // First try exact lookups, then fall back to search
+      // Try exact lookups first
       const funcResult = getFunction(data, name);
-      if (funcResult) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify(funcResult, null, 2) }],
-        };
-      }
+      if (funcResult) return jsonResult(funcResult);
 
       const clsResult = getClass(data, name);
-      if (clsResult) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify(clsResult, null, 2) }],
-        };
-      }
+      if (clsResult) return jsonResult(clsResult);
 
       const typeResult = getType(data, name);
-      if (typeResult) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify(typeResult, null, 2) }],
-        };
-      }
+      if (typeResult) return jsonResult(typeResult);
 
       const fileResult = getFile(data, name);
-      if (fileResult) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify(fileResult, null, 2) }],
-        };
-      }
+      if (fileResult) return jsonResult(fileResult);
 
       // Fall back to fuzzy search
       const results = search(data, name);
-      if (results.length === 0) {
-        return {
-          content: [{ type: 'text', text: `No results found for "${name}".` }],
-        };
-      }
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify(
-            results.map((r) => ({ type: r.type, name: r.name, file: r.file })),
-            null,
-            2
-          ),
-        }],
-      };
+      if (results.length === 0) return jsonResult({ message: `No results for "${name}".` });
+      return jsonResult(results.map((r) => ({ type: r.type, name: r.name, file: r.file })));
     }
   );
 
@@ -161,19 +272,14 @@ async function main() {
   server.tool(
     'codemap_callers',
     'Find all functions/methods that call a given function. Useful for understanding impact before modifying code.',
-    { name: z.string().describe('Function or method name (e.g. "createOrder", "UserService.validate")') },
-    async ({ name }) => {
-      const data = loadCodemapData();
-      if (!data) {
-        return {
-          content: [{ type: 'text', text: 'No codemap found. Run `codemap generate` first.' }],
-          isError: true,
-        };
-      }
-      const result = getCallers(data, name);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
+    {
+      name: z.string().describe('Function or method name (e.g. "createOrder", "UserService.validate")'),
+      project: projectParam,
+    },
+    async ({ name, project: projectName }) => {
+      const resolved = resolveProject(projects, projectName);
+      if ('error' in resolved) return errorResult(resolved.error);
+      return jsonResult(getCallers(resolved.data, name));
     }
   );
 
@@ -181,19 +287,14 @@ async function main() {
   server.tool(
     'codemap_calls',
     'Find all functions/methods that a given function calls. Useful for understanding dependencies before refactoring.',
-    { name: z.string().describe('Function or method name (e.g. "createOrder", "UserService.validate")') },
-    async ({ name }) => {
-      const data = loadCodemapData();
-      if (!data) {
-        return {
-          content: [{ type: 'text', text: 'No codemap found. Run `codemap generate` first.' }],
-          isError: true,
-        };
-      }
-      const result = getCalls(data, name);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
+    {
+      name: z.string().describe('Function or method name (e.g. "createOrder", "UserService.validate")'),
+      project: projectParam,
+    },
+    async ({ name, project: projectName }) => {
+      const resolved = resolveProject(projects, projectName);
+      if ('error' in resolved) return errorResult(resolved.error);
+      return jsonResult(getCalls(resolved.data, name));
     }
   );
 
