@@ -5,15 +5,16 @@
  * Exposes codemap data as MCP tools so Claude Code (and other MCP clients)
  * can query project structure, call graphs, and relationships on demand.
  *
- * Supports multiple projects. Pass project paths as CLI arguments:
- *   codemap-mcp /path/to/project-a /path/to/project-b
- *
- * Or use a config file:
- *   codemap-mcp --config ~/.codemap-projects.json
+ * Project resolution (in priority order):
+ *   1. CLI args:        codemap-mcp /path/a /path/b
+ *   2. .codemaprc:      { "projects": ["/path/a", "/path/b"] }
+ *                       Reads from cwd/.codemaprc or ~/.codemaprc
+ *   3. Default:         uses cwd (single project)
  *
  * Usage:
  *   claude mcp add codemap -- codemap-mcp ~/Work/project-a ~/Work/project-b
  *   claude mcp add codemap -- codemap-mcp .
+ *   claude mcp add codemap -- codemap-mcp  (reads projects from .codemaprc)
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -42,48 +43,64 @@ interface ProjectEntry {
 }
 
 /**
- * Parse CLI args to build the project list.
- * Supports: codemap-mcp /path/a /path/b
- *           codemap-mcp --config ~/.codemap-projects.json
- *           codemap-mcp (defaults to cwd)
+ * Resolve the project list. Priority:
+ *   1. CLI args: codemap-mcp /path/a /path/b
+ *   2. .codemaprc "projects" field (cwd/.codemaprc → ~/.codemaprc)
+ *   3. Default: cwd as single project
  */
 function resolveProjects(): ProjectEntry[] {
-  const args = process.argv.slice(2);
+  const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 
-  // --config flag: read from JSON file
-  const configIdx = args.indexOf('--config');
-  if (configIdx !== -1 && args[configIdx + 1]) {
-    const configPath = resolve(args[configIdx + 1]);
-    if (existsSync(configPath)) {
-      try {
-        const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-        // Config format: { "projects": ["/path/a", "/path/b"] }
-        // or: { "projects": [{ "name": "my-app", "root": "/path/a" }] }
-        const projects: ProjectEntry[] = (config.projects || []).map((p: string | ProjectEntry) => {
-          if (typeof p === 'string') {
-            const root = resolve(p);
-            return { name: basename(root), root };
-          }
-          return { ...p, root: resolve(p.root) };
-        });
-        return projects.length > 0 ? projects : [defaultProject()];
-      } catch {
-        return [defaultProject()];
-      }
-    }
-  }
-
-  // Direct path arguments
-  const paths = args.filter((a) => !a.startsWith('--'));
-  if (paths.length > 0) {
-    return paths.map((p) => {
+  // 1. CLI path arguments
+  if (args.length > 0) {
+    return args.map((p) => {
       const root = resolve(p);
       return { name: basename(root), root };
     });
   }
 
-  // Default: cwd
+  // 2. Check .codemaprc for "projects" field
+  const rcProjects = loadProjectsFromRc();
+  if (rcProjects.length > 0) return rcProjects;
+
+  // 3. Default: cwd
   return [defaultProject()];
+}
+
+/**
+ * Look for a "projects" array in .codemaprc.
+ * Checks cwd first, then home directory (~/.codemaprc).
+ *
+ * Supports:
+ *   { "projects": ["/path/a", "/path/b"] }
+ *   { "projects": [{ "name": "my-app", "root": "/path/a" }] }
+ */
+function loadProjectsFromRc(): ProjectEntry[] {
+  const candidates = [
+    join(process.cwd(), '.codemaprc'),
+    join(require('os').homedir(), '.codemaprc'),
+  ];
+
+  for (const rcPath of candidates) {
+    if (!existsSync(rcPath)) continue;
+    try {
+      const config = JSON.parse(readFileSync(rcPath, 'utf-8'));
+      if (!Array.isArray(config.projects) || config.projects.length === 0) continue;
+
+      return config.projects.map((p: string | { name?: string; root: string }) => {
+        if (typeof p === 'string') {
+          const root = resolve(p);
+          return { name: basename(root), root };
+        }
+        const root = resolve(p.root);
+        return { name: p.name || basename(root), root };
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return [];
 }
 
 function defaultProject(): ProjectEntry {
