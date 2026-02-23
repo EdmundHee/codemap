@@ -282,13 +282,48 @@ A compact, directory-level root summary designed for AI context windows. Include
 
 Per-directory detailed files with full function signatures, call/called_by relationships, and import graphs. Used by the MCP `codemap_module` tool for on-demand deep dives.
 
+## Auto-Update with Claude Code Hooks
+
+Use a Claude Code `SessionStart` hook to automatically regenerate the codemap when source files have changed. This runs `codemap check` at the start of each session — if any source files are newer than `codemap.json`, it regenerates before Claude starts working.
+
+Add this to your project's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "codemap check --quiet || codemap generate"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This runs on session startup only (not on resume/compact). `codemap check` exits with code 0 if fresh, 1 if stale, 2 if missing — so `||` triggers `codemap generate` only when needed.
+
+### Freshness Check
+
+You can also check staleness manually:
+
+```bash
+codemap check              # shows which files changed
+codemap check --quiet      # exit code only (0=fresh, 1=stale, 2=missing)
+```
+
 ## Architecture
 
 ```
 src/
 ├── cli/                  # CLI entry point and commands
 │   ├── index.ts          # Commander setup
-│   └── commands/         # generate, init, query, analyze, diff
+│   └── commands/         # generate, init, query, check, analyze, diff
 ├── core/                 # Core logic
 │   ├── config.ts         # .codemaprc loading and defaults
 │   ├── scanner.ts        # File discovery (fast-glob)
