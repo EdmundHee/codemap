@@ -21,11 +21,14 @@ export const initCommand = new Command('init')
     try {
       // Auto-detect include directories based on actual project structure
       const detectedDirs = detectIncludeDirs(root);
-      const config = {
-        ...DEFAULT_CONFIG,
+
+      // Only write user-specific overrides, not the full defaults.
+      // This way default excludes always stay up-to-date from the code.
+      const config: Record<string, any> = {
         include: detectedDirs,
       };
 
+      // Only write non-default values to keep .codemaprc minimal
       writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
       logger.success(`Created ${configPath}`);
       logger.info(`Auto-detected include dirs: ${detectedDirs.join(', ')}`);

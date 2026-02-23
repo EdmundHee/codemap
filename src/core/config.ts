@@ -108,10 +108,17 @@ export async function loadConfig(
     fileConfig.include = detectIncludeDirs(root);
   }
 
+  // Merge excludes: always include defaults, then add any user-specified extras
+  const mergedExcludes = Array.from(new Set([
+    ...DEFAULT_CONFIG.exclude,
+    ...(fileConfig.exclude || []),
+  ]));
+
   return {
     ...DEFAULT_CONFIG,
     ...fileConfig,
     root,
+    exclude: mergedExcludes,
     // CLI overrides take precedence
     ...(overrides.output && { output: overrides.output }),
     ...(overrides.framework && { framework: overrides.framework }),
