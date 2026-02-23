@@ -54,8 +54,9 @@ export function generateJson(input: GenerateInput): CodemapData {
   // Build project name from directory
   const projectName = config.root.split('/').pop() || 'unknown';
 
-  // Build files map
-  const files: Record<string, any> = {};
+  // Use Object.create(null) for all maps to avoid prototype key collisions
+  // (e.g., a class named "constructor" or a function named "toString")
+  const files: Record<string, any> = Object.create(null);
   for (const p of parsed) {
     files[p.file.relative] = {
       language: p.file.language,
@@ -68,8 +69,7 @@ export function generateJson(input: GenerateInput): CodemapData {
     };
   }
 
-  // Build classes map
-  const classes: Record<string, any> = {};
+  const classes: Record<string, any> = Object.create(null);
   for (const p of parsed) {
     for (const cls of p.classes) {
       classes[cls.name] = {
@@ -86,8 +86,7 @@ export function generateJson(input: GenerateInput): CodemapData {
     }
   }
 
-  // Build functions map
-  const functions: Record<string, any> = {};
+  const functions: Record<string, any> = Object.create(null);
   for (const p of parsed) {
     for (const func of p.functions) {
       functions[func.name] = {
@@ -102,8 +101,7 @@ export function generateJson(input: GenerateInput): CodemapData {
     }
   }
 
-  // Build types map
-  const types: Record<string, any> = {};
+  const types: Record<string, any> = Object.create(null);
   for (const p of parsed) {
     for (const type of p.types) {
       types[type.name] = {
@@ -116,8 +114,7 @@ export function generateJson(input: GenerateInput): CodemapData {
     }
   }
 
-  // Build env var dependencies
-  const envVars: Record<string, { used_in: string[]; accessed_by: string[] }> = {};
+  const envVars: Record<string, { used_in: string[]; accessed_by: string[] }> = Object.create(null);
   for (const p of parsed) {
     for (const envVar of p.envVars) {
       if (!envVars[envVar]) {
