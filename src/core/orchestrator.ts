@@ -8,7 +8,8 @@ import { detectFrameworks } from '../frameworks/detector';
 import { buildImportGraph } from '../analyzers/import-graph';
 import { buildCallGraph } from '../analyzers/call-graph';
 import { generateJson, CodemapData } from '../output/json-generator';
-import { generateMarkdown } from '../output/md-generator';
+import { generateMarkdown, generateModuleMarkdown } from '../output/md-generator';
+import { pathToModuleKey } from '../utils/file-utils';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
@@ -99,9 +100,13 @@ export class Orchestrator {
 
   private async writeOutput(data: CodemapData): Promise<void> {
     const outputDir = join(this.config.root, this.config.output);
+    const modulesDir = join(outputDir, 'modules');
 
     if (!existsSync(outputDir)) {
       mkdirSync(outputDir, { recursive: true });
+    }
+    if (!existsSync(modulesDir)) {
+      mkdirSync(modulesDir, { recursive: true });
     }
 
     // Write root JSON
@@ -109,11 +114,31 @@ export class Orchestrator {
     writeFileSync(jsonPath, JSON.stringify(data, null, 2));
     this.logger.info(`Written: ${jsonPath}`);
 
-    // Write root MD
+    // Write compact root MD summary
     const mdContent = generateMarkdown(data);
     const mdPath = join(outputDir, 'codemap.md');
     writeFileSync(mdPath, mdContent);
-    this.logger.info(`Written: ${mdPath}`);
+    const mdLines = mdContent.split('\n').length;
+    this.logger.info(`Written: ${mdPath} (${mdLines} lines)`);
+
+    // Write per-directory detailed module files
+    const directories = new Set<string>();
+    for (const filePath of Object.keys(data.files)) {
+      const dir = filePath.includes('/') ? filePath.split('/').slice(0, -1).join('/') : '.';
+      directories.add(dir);
+    }
+
+    let moduleCount = 0;
+    for (const dir of [...directories].sort()) {
+      const moduleContent = generateModuleMarkdown(data, dir);
+      if (!moduleContent) continue;
+
+      const moduleKey = pathToModuleKey(dir);
+      const modulePath = join(modulesDir, `${moduleKey}.md`);
+      writeFileSync(modulePath, moduleContent);
+      moduleCount++;
+    }
+    this.logger.info(`Written: ${moduleCount} module files in ${modulesDir}`);
 
     // Write content hashes for diff support
     const hashes = this.computeHashes(data);

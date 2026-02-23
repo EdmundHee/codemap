@@ -1,8 +1,9 @@
 import { CodemapData } from './json-generator';
 
 /**
- * Generate AI-optimized Markdown from codemap data.
- * Designed for minimal token usage while maintaining queryability.
+ * Generate a COMPACT root-level summary (~2K lines for large projects).
+ * Designed as a table of contents — names and locations only.
+ * For detailed info, use per-module files or `codemap query`.
  */
 export function generateMarkdown(data: CodemapData): string {
   const lines: string[] = [];
@@ -10,6 +11,12 @@ export function generateMarkdown(data: CodemapData): string {
   // Header
   lines.push(`# CODEMAP: ${data.project.name}`);
   lines.push(`> Generated: ${data.generated_at} | Languages: ${data.project.languages.join(', ')} | Frameworks: ${data.project.frameworks.join(', ') || 'none'}`);
+
+  const fileCount = Object.keys(data.files).length;
+  const classCount = Object.keys(data.classes).length;
+  const funcCount = Object.keys(data.functions).length;
+  const typeCount = Object.keys(data.types).length;
+  lines.push(`> Files: ${fileCount} | Classes: ${classCount} | Functions: ${funcCount} | Types: ${typeCount}`);
   lines.push('');
 
   // Entry points
@@ -18,18 +25,139 @@ export function generateMarkdown(data: CodemapData): string {
     lines.push('');
   }
 
-  // File index
-  lines.push('## FILE_INDEX');
-  for (const [path, fileData] of Object.entries(data.files)) {
-    const exports = fileData.exports.length > 0 ? ` → exports: ${fileData.exports.join(', ')}` : '';
+  // Directory structure summary — group files by directory
+  lines.push('## MODULES');
+  const dirMap = new Map<string, string[]>();
+  for (const filePath of Object.keys(data.files)) {
+    const dir = filePath.includes('/') ? filePath.split('/').slice(0, -1).join('/') : '.';
+    if (!dirMap.has(dir)) dirMap.set(dir, []);
+    dirMap.get(dir)!.push(filePath);
+  }
+  for (const [dir, files] of [...dirMap.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    lines.push(`${dir}/ (${files.length} files)`);
+  }
+  lines.push('');
+
+  // Classes — compact: name, file, method names only
+  if (classCount > 0) {
+    lines.push('## CLASSES');
+    for (const [name, cls] of Object.entries(data.classes) as [string, any][]) {
+      const ext = cls.extends ? ` < ${cls.extends}` : '';
+      const methods = cls.methods.map((m: any) => m.name).join(', ');
+      lines.push(`${name}${ext} [${cls.file}] → ${methods}`);
+    }
+    lines.push('');
+  }
+
+  // Functions — compact: name, file only (no params/signatures)
+  if (funcCount > 0) {
+    lines.push('## FUNCTIONS');
+
+    // Group by file to reduce repetition
+    const funcsByFile = new Map<string, string[]>();
+    for (const [name, func] of Object.entries(data.functions) as [string, any][]) {
+      const file = func.file;
+      if (!funcsByFile.has(file)) funcsByFile.set(file, []);
+      funcsByFile.get(file)!.push(name);
+    }
+    for (const [file, names] of [...funcsByFile.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`${file}: ${names.join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  // Types — compact: name and kind only
+  if (typeCount > 0) {
+    lines.push('## TYPES');
+    const typesByFile = new Map<string, string[]>();
+    for (const [name, type] of Object.entries(data.types) as [string, any][]) {
+      const file = type.file;
+      if (!typesByFile.has(file)) typesByFile.set(file, []);
+      typesByFile.get(file)!.push(`${type.kind}:${name}`);
+    }
+    for (const [file, typeNames] of [...typesByFile.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`${file}: ${typeNames.join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  // Import graph — keep this, it's structurally important and compact
+  const importEntries = Object.entries(data.import_graph).filter(([, deps]) => deps.length > 0);
+  if (importEntries.length > 0) {
+    lines.push('## IMPORT_GRAPH');
+    for (const [file, deps] of importEntries) {
+      lines.push(`${file} ← ${deps.join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  // Dependencies — always include, compact by nature
+  const pkgDeps = data.dependencies;
+  if (pkgDeps && Object.keys(pkgDeps.packages).length > 0) {
+    lines.push(`## DEPENDENCIES [${pkgDeps.source}]`);
+    const byType = { production: [] as string[], dev: [] as string[], peer: [] as string[] };
+    for (const [name, info] of Object.entries(pkgDeps.packages)) {
+      byType[info.type].push(`${name}@${info.version}`);
+    }
+    if (byType.production.length) lines.push(`prod: ${byType.production.join(', ')}`);
+    if (byType.dev.length) lines.push(`dev: ${byType.dev.join(', ')}`);
+    if (byType.peer.length) lines.push(`peer: ${byType.peer.join(', ')}`);
+    lines.push('');
+  }
+
+  // Environment dependencies — always include
+  const envVars = data.config_dependencies?.env_vars;
+  if (envVars && Object.keys(envVars).length > 0) {
+    lines.push('## ENV_DEPS');
+    for (const [varName, info] of Object.entries(envVars)) {
+      lines.push(`${varName} → ${info.used_in.join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Generate DETAILED markdown for a specific directory/module.
+ * Includes full signatures, call graphs, and called_by data.
+ */
+export function generateModuleMarkdown(
+  data: CodemapData,
+  directory: string
+): string {
+  const lines: string[] = [];
+
+  lines.push(`# MODULE: ${directory}`);
+  lines.push(`> Project: ${data.project.name} | Generated: ${data.generated_at}`);
+  lines.push('');
+
+  // Filter to files in this directory
+  const moduleFiles = Object.entries(data.files).filter(([path]) => {
+    const fileDir = path.includes('/') ? path.split('/').slice(0, -1).join('/') : '.';
+    return fileDir === directory;
+  });
+
+  if (moduleFiles.length === 0) return '';
+
+  // File index with exports
+  lines.push('## FILES');
+  for (const [path, fileData] of moduleFiles) {
+    const exports = fileData.exports.length > 0 ? ` → ${fileData.exports.join(', ')}` : '';
     lines.push(`${path} [${fileData.hash}]${exports}`);
   }
   lines.push('');
 
-  // Classes
-  if (Object.keys(data.classes).length > 0) {
+  // File paths in this module
+  const filePaths = new Set(moduleFiles.map(([path]) => path));
+
+  // Classes in this module — full detail
+  const moduleClasses = Object.entries(data.classes)
+    .filter(([, cls]: [string, any]) => filePaths.has(cls.file)) as [string, any][];
+
+  if (moduleClasses.length > 0) {
     lines.push('## CLASSES');
-    for (const [name, cls] of Object.entries(data.classes) as [string, any][]) {
+    for (const [name, cls] of moduleClasses) {
       const meta: string[] = [];
       if (cls.extends) meta.push(`extends: ${cls.extends}`);
       if (cls.implements?.length) meta.push(`implements: ${cls.implements.join(', ')}`);
@@ -60,10 +188,13 @@ export function generateMarkdown(data: CodemapData): string {
     }
   }
 
-  // Functions
-  if (Object.keys(data.functions).length > 0) {
+  // Functions in this module — full detail
+  const moduleFunctions = Object.entries(data.functions)
+    .filter(([, func]: [string, any]) => filePaths.has(func.file)) as [string, any][];
+
+  if (moduleFunctions.length > 0) {
     lines.push('## FUNCTIONS');
-    for (const [name, func] of Object.entries(data.functions) as [string, any][]) {
+    for (const [name, func] of moduleFunctions) {
       const params = func.params
         .map((p: any) => `${p.name}: ${p.type}`)
         .join(', ');
@@ -82,10 +213,13 @@ export function generateMarkdown(data: CodemapData): string {
     lines.push('');
   }
 
-  // Types
-  if (Object.keys(data.types).length > 0) {
+  // Types in this module — full detail
+  const moduleTypes = Object.entries(data.types)
+    .filter(([, type]: [string, any]) => filePaths.has(type.file)) as [string, any][];
+
+  if (moduleTypes.length > 0) {
     lines.push('## TYPES');
-    for (const [name, type] of Object.entries(data.types) as [string, any][]) {
+    for (const [name, type] of moduleTypes) {
       const extendsStr = type.extends?.length ? ` extends ${type.extends.join(', ')}` : '';
       lines.push(`${type.kind} ${name}${extendsStr} [${type.file}]`);
 
@@ -95,91 +229,6 @@ export function generateMarkdown(data: CodemapData): string {
           .join(', ');
         lines.push(`  { ${props} }`);
       }
-    }
-    lines.push('');
-  }
-
-  // Routes
-  if (data.routes.length > 0) {
-    lines.push('## ROUTES');
-    for (const route of data.routes) {
-      const mw = route.middleware?.length ? ` → [${route.middleware.join(', ')}]` : '';
-      lines.push(`${route.method} ${route.path}${mw} → ${route.handler}`);
-    }
-    lines.push('');
-  }
-
-  // Models
-  if (Object.keys(data.models).length > 0) {
-    lines.push('## MODELS');
-    for (const [name, model] of Object.entries(data.models) as [string, any][]) {
-      const ormStr = model.orm ? ` [${model.orm}]` : '';
-      lines.push(`### ${name}${ormStr} [${model.file}]`);
-
-      if (model.fields?.length) {
-        const fields = model.fields
-          .map((f: any) => {
-            const flags: string[] = [];
-            if (f.primary) flags.push('PK');
-            if (f.unique) flags.push('unique');
-            return `${f.name}(${f.type}${flags.length ? ',' + flags.join(',') : ''})`;
-          })
-          .join(', ');
-        lines.push(`fields: ${fields}`);
-      }
-
-      if (model.relations?.length) {
-        const rels = model.relations
-          .map((r: any) => `${r.type}: ${r.target}(${r.foreign_key || ''})`)
-          .join(' | ');
-        lines.push(`→ ${rels}`);
-      }
-    }
-    lines.push('');
-  }
-
-  // Call graph
-  if (Object.keys(data.call_graph).length > 0) {
-    lines.push('## CALL_GRAPH');
-    for (const [caller, callees] of Object.entries(data.call_graph)) {
-      if (callees.length > 0) {
-        lines.push(`${caller} → ${callees.join(', ')}`);
-      }
-    }
-    lines.push('');
-  }
-
-  // Import graph
-  if (Object.keys(data.import_graph).length > 0) {
-    lines.push('## IMPORT_GRAPH');
-    for (const [file, deps] of Object.entries(data.import_graph)) {
-      if (deps.length > 0) {
-        lines.push(`${file} ← ${deps.join(', ')}`);
-      }
-    }
-    lines.push('');
-  }
-
-  // Dependencies
-  const deps = data.dependencies;
-  if (deps && Object.keys(deps.packages).length > 0) {
-    lines.push(`## DEPENDENCIES [${deps.source}]`);
-    const byType = { production: [] as string[], dev: [] as string[], peer: [] as string[] };
-    for (const [name, info] of Object.entries(deps.packages)) {
-      byType[info.type].push(`${name}@${info.version}`);
-    }
-    if (byType.production.length) lines.push(`prod: ${byType.production.join(', ')}`);
-    if (byType.dev.length) lines.push(`dev: ${byType.dev.join(', ')}`);
-    if (byType.peer.length) lines.push(`peer: ${byType.peer.join(', ')}`);
-    lines.push('');
-  }
-
-  // Environment dependencies
-  const envVars = data.config_dependencies?.env_vars;
-  if (envVars && Object.keys(envVars).length > 0) {
-    lines.push('## ENV_DEPS');
-    for (const [varName, info] of Object.entries(envVars)) {
-      lines.push(`${varName} → ${info.used_in.join(', ')}`);
     }
     lines.push('');
   }

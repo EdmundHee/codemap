@@ -5,6 +5,7 @@ import { generateCommand } from './commands/generate';
 import { initCommand } from './commands/init';
 import { diffCommand } from './commands/diff';
 import { analyzeCommand } from './commands/analyze';
+import { queryCommand } from './commands/query';
 
 const program = new Command();
 
@@ -17,5 +18,6 @@ program.addCommand(generateCommand);
 program.addCommand(initCommand);
 program.addCommand(diffCommand);
 program.addCommand(analyzeCommand);
+program.addCommand(queryCommand);
 
 program.parse(process.argv);
