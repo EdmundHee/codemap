@@ -1,22 +1,32 @@
 import { CodemapData } from './json-generator';
 
 /**
- * Generate a COMPACT root-level summary (~2K lines for large projects).
- * Designed as a table of contents — names and locations only.
- * For detailed info, use per-module files or `codemap query`.
+ * Generate a COMPACT root-level summary.
+ * Target: ~1500-2500 lines even for 5000+ file projects.
+ *
+ * Strategy:
+ * - Header with stats
+ * - Directory tree with file/class/function counts
+ * - Classes grouped by directory (names only)
+ * - Functions grouped by directory (names only)
+ * - Dependencies and env vars (naturally compact)
+ * - NO import graph (too large, use module files)
+ * - NO call graph (too large, use `codemap query --calls`)
+ * - Points user to module files and query command for details
  */
 export function generateMarkdown(data: CodemapData): string {
   const lines: string[] = [];
-
-  // Header
-  lines.push(`# CODEMAP: ${data.project.name}`);
-  lines.push(`> Generated: ${data.generated_at} | Languages: ${data.project.languages.join(', ')} | Frameworks: ${data.project.frameworks.join(', ') || 'none'}`);
 
   const fileCount = Object.keys(data.files).length;
   const classCount = Object.keys(data.classes).length;
   const funcCount = Object.keys(data.functions).length;
   const typeCount = Object.keys(data.types).length;
+
+  // Header
+  lines.push(`# CODEMAP: ${data.project.name}`);
+  lines.push(`> Generated: ${data.generated_at} | Languages: ${data.project.languages.join(', ')} | Frameworks: ${data.project.frameworks.join(', ') || 'none'}`);
   lines.push(`> Files: ${fileCount} | Classes: ${classCount} | Functions: ${funcCount} | Types: ${typeCount}`);
+  lines.push(`> Detail: use \`codemap query\` or see .codemap/modules/ for full signatures and call graphs`);
   lines.push('');
 
   // Entry points
@@ -25,68 +35,93 @@ export function generateMarkdown(data: CodemapData): string {
     lines.push('');
   }
 
-  // Directory structure summary — group files by directory
-  lines.push('## MODULES');
-  const dirMap = new Map<string, string[]>();
+  // Build directory-level aggregations
+  const dirStats = new Map<string, {
+    files: string[];
+    classes: string[];
+    functions: string[];
+    types: string[];
+  }>();
+
+  const getDir = (filePath: string) =>
+    filePath.includes('/') ? filePath.split('/').slice(0, -1).join('/') : '.';
+
+  // Aggregate files
   for (const filePath of Object.keys(data.files)) {
-    const dir = filePath.includes('/') ? filePath.split('/').slice(0, -1).join('/') : '.';
-    if (!dirMap.has(dir)) dirMap.set(dir, []);
-    dirMap.get(dir)!.push(filePath);
+    const dir = getDir(filePath);
+    if (!dirStats.has(dir)) dirStats.set(dir, { files: [], classes: [], functions: [], types: [] });
+    dirStats.get(dir)!.files.push(filePath);
   }
-  for (const [dir, files] of [...dirMap.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    lines.push(`${dir}/ (${files.length} files)`);
+
+  // Aggregate classes
+  for (const [name, cls] of Object.entries(data.classes) as [string, any][]) {
+    const dir = getDir(cls.file);
+    if (dirStats.has(dir)) dirStats.get(dir)!.classes.push(name);
+  }
+
+  // Aggregate functions
+  for (const [name, func] of Object.entries(data.functions) as [string, any][]) {
+    const dir = getDir(func.file);
+    if (dirStats.has(dir)) dirStats.get(dir)!.functions.push(name);
+  }
+
+  // Aggregate types
+  for (const [name, type] of Object.entries(data.types) as [string, any][]) {
+    const dir = getDir(type.file);
+    if (dirStats.has(dir)) dirStats.get(dir)!.types.push(name);
+  }
+
+  const sortedDirs = [...dirStats.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  // Module tree with counts
+  lines.push('## MODULES');
+  for (const [dir, stats] of sortedDirs) {
+    const parts: string[] = [`${stats.files.length}f`];
+    if (stats.classes.length > 0) parts.push(`${stats.classes.length}c`);
+    if (stats.functions.length > 0) parts.push(`${stats.functions.length}fn`);
+    if (stats.types.length > 0) parts.push(`${stats.types.length}t`);
+    lines.push(`${dir}/ (${parts.join(', ')})`);
   }
   lines.push('');
 
-  // Classes — compact: name, file, method names only
+  // Classes — grouped by directory, names only
   if (classCount > 0) {
     lines.push('## CLASSES');
-    for (const [name, cls] of Object.entries(data.classes) as [string, any][]) {
-      const ext = cls.extends ? ` < ${cls.extends}` : '';
-      const methods = cls.methods.map((m: any) => m.name).join(', ');
-      lines.push(`${name}${ext} [${cls.file}] → ${methods}`);
+    for (const [dir, stats] of sortedDirs) {
+      if (stats.classes.length === 0) continue;
+      lines.push(`${dir}/: ${stats.classes.join(', ')}`);
     }
     lines.push('');
   }
 
-  // Functions — compact: name, file only (no params/signatures)
+  // Functions — grouped by directory, names only
+  // For large projects, cap function names per directory to avoid bloat
   if (funcCount > 0) {
     lines.push('## FUNCTIONS');
-
-    // Group by file to reduce repetition
-    const funcsByFile = new Map<string, string[]>();
-    for (const [name, func] of Object.entries(data.functions) as [string, any][]) {
-      const file = func.file;
-      if (!funcsByFile.has(file)) funcsByFile.set(file, []);
-      funcsByFile.get(file)!.push(name);
-    }
-    for (const [file, names] of [...funcsByFile.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      lines.push(`${file}: ${names.join(', ')}`);
+    for (const [dir, stats] of sortedDirs) {
+      if (stats.functions.length === 0) continue;
+      if (stats.functions.length <= 20) {
+        lines.push(`${dir}/: ${stats.functions.join(', ')}`);
+      } else {
+        // Show first 15 and count
+        const shown = stats.functions.slice(0, 15).join(', ');
+        lines.push(`${dir}/: ${shown} ... +${stats.functions.length - 15} more`);
+      }
     }
     lines.push('');
   }
 
-  // Types — compact: name and kind only
+  // Types — grouped by directory, names only
   if (typeCount > 0) {
     lines.push('## TYPES');
-    const typesByFile = new Map<string, string[]>();
-    for (const [name, type] of Object.entries(data.types) as [string, any][]) {
-      const file = type.file;
-      if (!typesByFile.has(file)) typesByFile.set(file, []);
-      typesByFile.get(file)!.push(`${type.kind}:${name}`);
-    }
-    for (const [file, typeNames] of [...typesByFile.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      lines.push(`${file}: ${typeNames.join(', ')}`);
-    }
-    lines.push('');
-  }
-
-  // Import graph — keep this, it's structurally important and compact
-  const importEntries = Object.entries(data.import_graph).filter(([, deps]) => deps.length > 0);
-  if (importEntries.length > 0) {
-    lines.push('## IMPORT_GRAPH');
-    for (const [file, deps] of importEntries) {
-      lines.push(`${file} ← ${deps.join(', ')}`);
+    for (const [dir, stats] of sortedDirs) {
+      if (stats.types.length === 0) continue;
+      if (stats.types.length <= 20) {
+        lines.push(`${dir}/: ${stats.types.join(', ')}`);
+      } else {
+        const shown = stats.types.slice(0, 15).join(', ');
+        lines.push(`${dir}/: ${shown} ... +${stats.types.length - 15} more`);
+      }
     }
     lines.push('');
   }
@@ -229,6 +264,19 @@ export function generateModuleMarkdown(
           .join(', ');
         lines.push(`  { ${props} }`);
       }
+    }
+    lines.push('');
+  }
+
+  // Import graph for this module only
+  const moduleImports = Object.entries(data.import_graph)
+    .filter(([file]) => filePaths.has(file))
+    .filter(([, deps]) => deps.length > 0);
+
+  if (moduleImports.length > 0) {
+    lines.push('## IMPORTS');
+    for (const [file, deps] of moduleImports) {
+      lines.push(`${file} ← ${deps.join(', ')}`);
     }
     lines.push('');
   }
